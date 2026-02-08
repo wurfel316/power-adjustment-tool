@@ -53,7 +53,7 @@ function calc() {
 
   let n = 1; // 1/2^n の n
 
-  // できるだけ近づける
+  // 近づける
   while (value > EPS) {
 
     if (current + value <= T) {
@@ -100,32 +100,16 @@ if (current < minTarget) {
   }
 }
 
-// 最後の項を「置き換える」方式
-if (used.length > 0) {
+// ===== 超過分を削る調整 =====
+used.sort((a, b) => a.val - b.val);
 
-  const last = used[used.length - 1];
+for (let i = 0; i < used.length; i++) {
+  const u = used[i];
 
-  const newPow = last.pow - 1;
-  const newVal = last.val * 2;
-
-  // すでに使っていないか確認
-  const exists = used.some(
-    (u, i) => u.pow === newPow && i !== used.length - 1
-  );
-
-  if (!exists && newPow >= 1) {
-
-    // ① last を削除
-    used.pop();
-    current -= last.val;
-
-    // ② 2倍した項を追加
-    current += newVal;
-
-    used.push({
-      val: newVal,
-      pow: newPow
-    });
+  if (current - u.val >= minTarget) {
+    current -= u.val;
+    used.splice(i, 1);
+    i--;
   }
 }
 
