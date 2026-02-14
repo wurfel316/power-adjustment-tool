@@ -116,6 +116,11 @@
     <input id="a" type="number" step="10" value="1100">
     不足電力：
     <input id="t" type="number" step="5" value="0">
+    <label>
+        <input id="marginCheck" type="checkbox" style="width: auto; margin-right: 5px;">
+        安全マージン：
+    </label>
+    <input id="m" type="number" step="5" value="0">
     <button onclick="calc()">計算</button>
     <div id="result"></div>
     <div id="all-steps" style="display: none; margin-top: 30px;">
@@ -129,26 +134,30 @@
         function calc() {
             const baseA = Number(document.getElementById("a").value);
             const T0 = Number(document.getElementById("t").value);
+            const margin = Number(document.getElementById("m").value);
+            const marginEnabled = document.getElementById("marginCheck").checked;
+            const targetT = marginEnabled ? T0 + margin : T0;
 
             // 全ての計算結果を保存する配列
             const allResults = [];
 
             // 初回計算（制限なし）
-            let result = runSimulation(baseA, T0, Infinity);
+            // runSimulation(baseA, allocationTarget, consumption, maxAllowedPow)
+            let result = runSimulation(baseA, targetT, T0, Infinity);
             allResults.push({ result: result, step: 0, maxPowLimit: Infinity });
             let retryCount = 0;
 
             // deadの場合、最大パルス段を下げて再計算
             // パルス段(p>=3)が存在する場合のみリトライ可能
             while (result.dead && result.maxPulsePow >= 3 && retryCount < 10) {
-                result = runSimulation(baseA, T0, result.maxPulsePow - 1);
+                result = runSimulation(baseA, targetT, T0, result.maxPulsePow - 1);
                 retryCount++;
                 allResults.push({ result: result, step: retryCount, maxPowLimit: result.maxPulsePow });
             }
 
             // 結果表示
             let text = "";
-            text += `供給電力合計: ${result.current.toFixed(1)}<br>`;
+            text += `供給電力合計: ${result.current.toFixed(1)} (目標: ${targetT}, 消費: ${T0})<br>`;
 
             // 構成要素の表示（段順にソート）
             const sortedUsed = [...result.used].sort((a, b) => a.pow - b.pow);
@@ -257,14 +266,24 @@
             const axisColor = isDarkMode ? "#e0e0e0" : "black";
 
             if (result.times.length > 1) {
-                // グラフのX軸範囲：シミュレーションが終了した時間（枯渇時はその時点まで）
-                const maxTime = result.times[result.times.length - 1];
+                // グラフ描画の終了時刻を決定
+                // graphEndTimeが設定されていればそれを使用、なければ最後まで
+                const displayEndTime = result.graphEndTime !== null ? result.graphEndTime : result.times[result.times.length - 1];
+                
+                // 表示する範囲のインデックスを見つける
+                let endIndex = result.times.findIndex(t => t >= displayEndTime);
+                if (endIndex === -1) endIndex = result.times.length - 1;
+                
+                // 表示範囲のデータを抽出
+                const displayTimes = result.times.slice(0, endIndex + 1);
+                const displayStores = result.stores.slice(0, endIndex + 1);
+                const maxTime = displayTimes[displayTimes.length - 1];
 
                 ctx.beginPath();
-                ctx.moveTo(0, height - (result.stores[0] / STORAGE_MAX) * height);
-                for (let i = 1; i < result.times.length; i++) {
-                    const x = (result.times[i] / maxTime) * width;
-                    const y = height - (result.stores[i] / STORAGE_MAX) * height;
+                ctx.moveTo(0, height - (displayStores[0] / STORAGE_MAX) * height);
+                for (let i = 1; i < displayTimes.length; i++) {
+                    const x = (displayTimes[i] / maxTime) * width;
+                    const y = height - (displayStores[i] / STORAGE_MAX) * height;
                     ctx.lineTo(x, y);
                 }
 
@@ -283,15 +302,20 @@
                 ctx.fillStyle = axisColor;
                 ctx.font = "12px sans-serif";
                 ctx.textAlign = "right";
-                // 右端から少し離して表示
                 ctx.fillText(Math.round(maxTime) + "s", width - 5, height - 5);
             }
         }
 
-        function runSimulation(baseA, T0, maxAllowedPow) {
+        /**
+         * @param {number} baseA バッテリー出力
+         * @param {number} targetT 目標供給電力（不足電力＋マージン）
+         * @param {number} realT 実際の消費電力（不足電力）
+         * @param {number} maxAllowedPow 最大許容段数
+         */
+        function runSimulation(baseA, targetT, realT, maxAllowedPow) {
             const A = baseA * 4;
 
-            /* ===== 段選択 ===== */
+            /* ===== 段選択 (targetTを使用) ===== */
             let used = [];
             let current = 0;
             let value = A / 2;
@@ -300,7 +324,7 @@
             while (value > 1) {
                 // n（段数）が許容範囲内であれば追加判定
                 if (n <= maxAllowedPow) {
-                    if (current + value <= T0) {
+                    if (current + value <= targetT) {
                         current += value;
                         used.push({ val: value, pow: n });
                     }
@@ -309,8 +333,8 @@
                 n++;
             }
 
-            /* ===== T0を下回らないよう補正 ===== */
-            if (current < T0) {
+            /* ===== targetTを下回らないよう補正 ===== */
+            if (current < targetT) {
                 const usedPows = new Set(used.map(u => u.pow));
                 // nはループ終了後の値になっているので、maxAllowedPowと比較して調整
                 let extraPow = n - 1;
@@ -321,7 +345,7 @@
 
                 while (
                     extraPow > 0 &&
-                    (usedPows.has(extraPow) || current + extraVal < T0)
+                    (usedPows.has(extraPow) || current + extraVal < targetT)
                 ) {
                     extraPow--;
                     extraVal = A / Math.pow(2, extraPow);
@@ -336,12 +360,12 @@
                 }
             }
 
-            /* ===== 過剰分を削減する最適化 ===== */
-            // 値の大きい順にソートし、削除してもT0を下回らないなら削除する
+            /* ===== 過剰分を削減する最適化 (targetTを使用) ===== */
+            // 値の大きい順にソートし、削除してもtargetTを下回らないなら削除する
             used.sort((a, b) => b.val - a.val);
             for (let i = 0; i < used.length; i++) {
                 const u = used[i];
-                if (current - u.val >= T0) {
+                if (current - u.val >= targetT) {
                     current -= u.val;
                     used.splice(i, 1);
                     i--; // 削除したのでインデックスを調整
@@ -368,7 +392,7 @@
             const pulsePows = used.map(u => u.pow).filter(p => p >= 3);
             const maxPulsePow = pulsePows.length > 0 ? Math.max(...pulsePows) : 0;
 
-            /* ===== 時間シミュレーション ===== */
+            /* ===== 時間シミュレーション (realTを使用) ===== */
             // 最長パルス周期を計算してシミュレーション時間とする（視覚的にわかりやすくするため2倍）
             const maxCycle = pulsePows.length > 0 ? 10 * Math.pow(2, Math.max(...pulsePows)) : 3600;
             const simTime = maxCycle * 2;
@@ -380,6 +404,8 @@
             // recovered: 減った後、再び満タンまで回復したかどうか
             let hasDropped = false;
             let recovered = false;
+            let fullCount = 0; // 満タンになった回数
+            let graphEndTime = null; // グラフ描画を終了する時刻
 
             const times = [];
             const stores = [];
@@ -392,7 +418,8 @@
                         supply += baseA;
                     }
                 }
-                storage += (supply - T0) * STEP;
+                // ここで実際の消費電力 realT を使用する
+                storage += (supply - realT) * STEP;
                 storage = Math.min(storage, STORAGE_MAX);
                 storage = Math.max(storage, 0);
                 minStorage = Math.min(minStorage, storage);
@@ -404,6 +431,11 @@
                 // 減った状態から満タンに復帰したかをチェック
                 else if (hasDropped && storage >= STORAGE_MAX) {
                     recovered = true;
+                    fullCount++;
+                    // 2度目の満タンでグラフ描画終了時刻を記録（シミュレーションは継続）
+                    if (fullCount >= 2 && graphEndTime === null) {
+                        graphEndTime = time;
+                    }
                 }
 
                 times.push(time);
@@ -432,7 +464,8 @@
                 dead,
                 times,
                 stores,
-                simTime
+                simTime,
+                graphEndTime
             };
         }
     </script>
